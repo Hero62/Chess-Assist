@@ -16,6 +16,20 @@ def _set_valid_turn(board: chess.Board, preferred: chess.Color) -> bool:
     return False
 
 
+def sq_to_rc(square: int, player_color: chess.Color) -> tuple[int, int]:
+    """Map a `chess.SQUARE` to a (row, col) cell in the captured board image.
+
+    Row 0 is the top of the image. When the user plays White, row 0 = rank 8
+    and col 0 = file a. When playing Black the board is visually flipped, so
+    row 0 = rank 1 and col 0 = file h.
+    """
+    file = chess.square_file(square)
+    rank = chess.square_rank(square)
+    if player_color == chess.WHITE:
+        return (7 - rank, file)
+    return (rank, 7 - file)
+
+
 class FrameTracker:
     """Owns game state, screenshot diff, and last-suggestion cache.
 
@@ -89,11 +103,7 @@ class FrameTracker:
         return ("moved", moves)
 
     def _sq_to_rc(self, square: int) -> tuple[int, int]:
-        file = chess.square_file(square)
-        rank = chess.square_rank(square)
-        if self.player_color == chess.WHITE:
-            return (7 - rank, file)
-        return (rank, 7 - file)
+        return sq_to_rc(square, self.player_color)
 
     def _occupancy_from_board(self, board: chess.Board) -> np.ndarray:
         occ = np.zeros((8, 8), dtype=bool)

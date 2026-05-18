@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from board_detector import detect, square_occupancy
-from frame_tracker import FrameTracker
+from frame_tracker import FrameTracker, sq_to_rc
 from piece_classifier import classify_board
 
 FIXTURES = os.path.dirname(__file__)
@@ -131,3 +131,47 @@ def test_engine_responds_after_e4():
     move = eng.best_move(tracker.board.fen())
     assert move is not None
     assert chess.Move.from_uci(move) in tracker.board.legal_moves
+
+
+def test_sq_to_rc_matches_white_and_black():
+    """Locks the board-image orientation contract that the Highlights
+    overlay depends on. From White's POV, e4 (file=4, rank=3) sits at
+    image row 4, col 4 (rank 8 is at top). From Black's POV the board is
+    flipped, so e4 maps to row 3, col 3.
+    """
+    # White perspective: row 0 = rank 8, col 0 = file a.
+    assert sq_to_rc(chess.E4, chess.WHITE) == (4, 4)
+    assert sq_to_rc(chess.A8, chess.WHITE) == (0, 0)
+    assert sq_to_rc(chess.H1, chess.WHITE) == (7, 7)
+
+    # Black perspective: row 0 = rank 1, col 0 = file h.
+    assert sq_to_rc(chess.E4, chess.BLACK) == (3, 3)
+    assert sq_to_rc(chess.A8, chess.BLACK) == (7, 7)
+    assert sq_to_rc(chess.H1, chess.BLACK) == (0, 0)
+
+
+def test_low_confidence_match_rejected():
+    """A featureless gray cell does not resemble any chess piece — every
+    template's correlation score is near zero. `_match_type` must return
+    None instead of arbitrarily picking the (worst) best of a bad lot.
+
+    This is the safety net that prevents the v2 overlay from highlighting
+    the wrong piece when a transient screen state (animation, hover dot,
+    premove arrow) corrupts a cell.
+    """
+    from piece_classifier import (
+        _match_type,
+        _templates,
+        TEMPLATE_SIZE,
+        NEUTRAL_GRAY,
+    )
+
+    templates = _templates()
+    assert templates, "calibration templates failed to load — cannot run test"
+
+    # Pure neutral gray "cell" — exactly the post-bg-stripping state, but
+    # with no piece silhouette in it. Templates have detailed silhouettes,
+    # so correlation should be near zero across the board.
+    blank = np.full((TEMPLATE_SIZE, TEMPLATE_SIZE), NEUTRAL_GRAY, dtype=np.uint8)
+    assert _match_type(blank, "w", templates) is None
+    assert _match_type(blank, "b", templates) is None

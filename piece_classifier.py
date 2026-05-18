@@ -35,6 +35,14 @@ TEMPLATE_SIZE = 96
 NEUTRAL_GRAY = 128
 BG_RGB_DEVIATION = 28
 
+# Confidence floor for accepting a per-square template match. cv2's
+# TM_CCOEFF_NORMED returns values in [-1, 1]; a real chess.com piece against
+# the calibration templates scores well above 0.5 in practice. Anything
+# lower is a corrupted cell (animation mid-flight, hover indicator,
+# premove arrow) and must be rejected to avoid showing the wrong piece.
+MIN_SCORE = 0.35
+MIN_MARGIN = 0.05  # winning template must beat #2 by at least this much
+
 _PIECE_TYPE = {
     "P": chess.PAWN,
     "N": chess.KNIGHT,
@@ -122,25 +130,68 @@ def _piece_color(cell_gray: np.ndarray) -> str:
     return "b" if very_dark > very_bright else "w"
 
 
-def _match_type(cell_norm: np.ndarray, color: str, templates: dict[str, np.ndarray]) -> str | None:
-    best_code = None
-    best_score = -2.0
+def _rank_templates(
+    cell_norm: np.ndarray, color: str, templates: dict[str, np.ndarray]
+) -> list[tuple[str, float]]:
+    """Return [(code, score), ...] for all same-color templates, sorted desc."""
+    scores: list[tuple[str, float]] = []
     for code, tmpl in templates.items():
         if not code.startswith(color):
             continue
         score = float(cv2.matchTemplate(cell_norm, tmpl, cv2.TM_CCOEFF_NORMED)[0, 0])
-        if score > best_score:
-            best_score = score
-            best_code = code
+        scores.append((code, score))
+    scores.sort(key=lambda kv: -kv[1])
+    return scores
+
+
+def _match_type(
+    cell_norm: np.ndarray,
+    color: str,
+    templates: dict[str, np.ndarray],
+    *,
+    debug_log=None,
+    square_name: str | None = None,
+) -> str | None:
+    """Return the best-matching piece code, or None if confidence is too low.
+
+    A match is rejected when either (a) the top score falls below
+    `MIN_SCORE` (cell is too noisy to look like any template — likely a
+    transient state) or (b) the top two candidates differ by less than
+    `MIN_MARGIN` (the classifier is guessing between two similar shapes).
+    """
+    ranked = _rank_templates(cell_norm, color, templates)
+    if not ranked:
+        return None
+    best_code, best_score = ranked[0]
+    second_code, second_score = ranked[1] if len(ranked) > 1 else ("—", -2.0)
+    if best_score < MIN_SCORE or (best_score - second_score) < MIN_MARGIN:
+        if debug_log is not None:
+            sq = square_name or "?"
+            reason = "low_score" if best_score < MIN_SCORE else "tight_margin"
+            debug_log(
+                f"  reject {sq}: {reason} best={best_code}:{best_score:.3f} "
+                f"second={second_code}:{second_score:.3f}"
+            )
+        return None
     return best_code
 
 
-def classify_board(board_img: np.ndarray, player_color: chess.Color) -> chess.Board | None:
+def classify_board(
+    board_img: np.ndarray,
+    player_color: chess.Color,
+    *,
+    debug_log=None,
+) -> chess.Board | None:
     """Visually classify every piece on a cropped board image.
 
     Returns a `chess.Board` with pieces placed (no move history). Whose turn
     it is must be set by the caller — typically to `player_color` because
     the user only invokes Infer when it's their turn.
+
+    If `debug_log` is supplied, it receives a single-line string for any
+    per-square rejection. A single rejected square aborts the whole
+    classification (returns None) so the caller fails closed rather than
+    surfacing a partial / wrong position.
     """
     if board_img is None or board_img.ndim != 3:
         return None
@@ -156,21 +207,28 @@ def classify_board(board_img: np.ndarray, player_color: chess.Color) -> chess.Bo
         for c in range(8):
             if not occ[r, c]:
                 continue
+            if player_color == chess.WHITE:
+                rank, file = 7 - r, c
+            else:
+                rank, file = r, 7 - c
+            sq = chess.square(file, rank)
+            sq_name = chess.square_name(sq)
+
             cell_rgb = _extract_cell(board_img, r, c)
             cell_gray = _extract_cell(gray, r, c)
             if cell_gray.size == 0:
                 continue
             color = _piece_color(cell_gray)
             normalized = _normalize_cell(cell_rgb)
-            code = _match_type(normalized, color, templates)
+            code = _match_type(
+                normalized, color, templates,
+                debug_log=debug_log, square_name=sq_name,
+            )
             if code is None:
+                if debug_log is not None:
+                    debug_log(f"classify_board: aborted at {sq_name}")
                 return None
 
-            if player_color == chess.WHITE:
-                rank, file = 7 - r, c
-            else:
-                rank, file = r, 7 - c
-            sq = chess.square(file, rank)
             piece = chess.Piece(
                 _PIECE_TYPE[code[1]],
                 chess.WHITE if color == "w" else chess.BLACK,
